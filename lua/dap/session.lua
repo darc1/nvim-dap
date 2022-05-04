@@ -543,7 +543,7 @@ do
         api.nvim_buf_attach(bufnr, false, { on_detach = on_detach })
       end
       local path = vim.fn.fnamemodify(api.nvim_buf_get_name(bufnr), ':.')
-      print(vim.inspect(path))
+      log.info(vim.inspect(path))
       local payload = {
         source = {
           path = path;
