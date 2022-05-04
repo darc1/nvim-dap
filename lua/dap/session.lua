@@ -542,7 +542,7 @@ do
         detach_handlers[bufnr] = on_detach
         api.nvim_buf_attach(bufnr, false, { on_detach = on_detach })
       end
-      local path = api.nvim_buf_get_name(bufnr)
+      local path = vim.fn.fnamemodify(api.nvim_buf_get_name(bufnr), ':.')
       local payload = {
         source = {
           path = path;
