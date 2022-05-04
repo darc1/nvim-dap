@@ -284,12 +284,13 @@ local function jump_to_frame(cur_session, frame, preserve_focus_hint)
       utils.notify('Source path not available, cannot jump to frame', vim.log.levels.INFO)
       return
     end
-    local scheme = source.path:match('^([a-z]+)://.*')
+    local path = vim.fn.fnamemodify(source.path, ':p')
+    local scheme = path:match('^([a-z]+)://.*')
     local bufnr
     if scheme then
-      bufnr = vim.uri_to_bufnr(source.path)
+      bufnr = vim.uri_to_bufnr(path)
     else
-      bufnr = vim.uri_to_bufnr(vim.uri_from_fname(source.path))
+      bufnr = vim.uri_to_bufnr(vim.uri_from_fname(path))
     end
     vim.fn.bufload(bufnr)
     jump_to_location(bufnr, frame.line, frame.column)
