@@ -1,6 +1,8 @@
 local api = vim.api
 local utils = require('dap.utils')
 local M = {}
+
+---@type Session|nil
 local session = nil
 local last_run = nil
 
@@ -48,7 +50,7 @@ M.defaults = setmetatable(
   {
     fallback = {
       exception_breakpoints = 'default';
-      -- type SteppingGranularity = 'statement' | 'line' | 'instruction'
+      ---@type "statement"|"line"|"instruction"
       stepping_granularity = 'statement';
       terminal_win_cmd = 'belowright new';
       focus_terminal = false;
@@ -72,59 +74,71 @@ M.defaults = setmetatable(
 local DAP_QUICKFIX_TITLE = "DAP Breakpoints"
 local DAP_QUICKFIX_CONTEXT = DAP_QUICKFIX_TITLE
 
---- For extension of language specific debug adapters.
---
--- `adapters.<type>` where <type> is specified in a configuration.
---
--- For example:
---
--- require('dap').adapters.python = {
---    type = 'executable';
---    command = '/path/to/python';
---    args = {'-m', 'debugpy.adapter' };
--- }
---
+---@class Adapter
+---@field type string
+---@field id string|nil
+---@field options nil|AdapterOptions
+---@field enrich_config fun(config: Configuration, on_config: fun(config: Configuration))
+
+---@class AdapterOptions
+---@field initialize_timeout_sec nil|number
+---@field disconnect_timeout_sec nil|number
+---@field source_filetype nil|string
+
+---@class ExecutableAdapter : Adapter
+---@field type "executable"
+---@field command string
+---@field args string[]
+---@field options nil|ExecutableOptions
+
+---@class ExecutableOptions : AdapterOptions
+---@field env nil|table<string, string>
+---@field cwd nil|string
+---@field detached nil|boolean
+
+---@class ServerAdapter
+---@field type "server"
+---@field host string|nil
+---@field port number
+
+
+--- Adapter definitions. See `:help dap-adapter` for more help
+---
+--- An example:
+---
+--- ```
+--- require('dap').adapter.debugpy = {
+---   {
+---       type = "executable"
+---       command = "/usr/bin/python",
+---       args = {"-m", "debugpy.adapter"},
+---   },
+--- }
+--- ```
+---@type table<string, Adapter|fun(callback: fun(adapter: Adapter), config: Configuration)>
 M.adapters = {}
 
 
---- Configurations for languages
---
--- Example:
---
--- require('dap').configurations.python = {
---  {
---    type = 'python';
---    request = 'launch';
---    name = "Launch file";
---
---    -- Some predefined variables are supported. Their definitions can be found here
---    -- https://code.visualstudio.com/docs/editor/variables-reference#_predefined-variables-examples
---    -- The supported variables are:
---    -- ${file}
---    -- ${fileBasename}
---    -- ${fileBasenameNoExtension}
---    -- ${fileDirname}
---    -- ${fileExtname}
---    -- ${relativeFile}
---    -- ${relativeFileDirname}
---    -- ${workspaceFolder}
---    -- ${workspaceFolderBasename}
---    program = "${file}";
---
---    -- values other than type, request and name can be functions, they'll be evaluated when the configuration is used
---    pythonPath = function()
---      local cwd = vim.fn.getcwd()
---      if vim.fn.executable(cwd .. '/venv/bin/python') then
---        return cwd .. '/venv/bin/python'
---      elseif vim.fn.executable(cwd .. '/.venv/bin/python') then
---        return cwd .. '/.venv/bin/python'
---      else
---        return '/usr/bin/python'
---      end
---    end;
---  }
--- }
---
+---@class Configuration
+---@field type string
+---@field request "launch"|"attach"
+---@field name string
+
+--- Configurations per adapter. See `:help dap-configuration` for more help.
+---
+--- An example:
+---
+--- ```
+--- require('dap').configurations.python = {
+---   {
+---       name = "My configuration",
+---       type = "debugpy", -- references an entry in dap.adapters
+---       request = "launch",
+---       -- + Other debug adapter specific configuration options
+---   },
+--- }
+--- ```
+---@type table<string, Configuration[]>
 M.configurations = {}
 
 
@@ -238,6 +252,9 @@ local function select_config_and_run()
 end
 
 
+--- Start a debug session
+---@param config Configuration
+---@param opts table|nil
 function M.run(config, opts)
   assert(
     type(config) == 'table',
@@ -288,6 +305,7 @@ function M.run(config, opts)
 end
 
 
+--- Run the last debug session again
 function M.run_last()
   if last_run then
     M.run(last_run.config, last_run.opts)
@@ -296,8 +314,8 @@ function M.run_last()
   end
 end
 
-
-
+--- Step over the current line
+---@param opts table
 function M.step_over(opts)
   if not session then return end
   session:_step('next', opts)
@@ -634,13 +652,11 @@ function M.omnifunc(findstart, base)
 end
 
 
---- Attach to an existing debug-adapter running on host, port
---  and then initialize it with config
---
--- Configuration:         -- Specifies how the debug adapter should connect/launch the debugee
---    request: string     -- attach or launch
---    ...                 -- debug adapter specific options
---
+--- Connect to a debug adapter via TCP
+---@param adapter ServerAdapter
+---@param config Configuration
+---@param opts table
+---@param bwc_dummy any
 function M.attach(adapter, config, opts, bwc_dummy)
   if type(adapter) == 'string' then
     utils.notify(
@@ -672,32 +688,25 @@ function M.attach(adapter, config, opts, bwc_dummy)
         end
       end)
     else
-      session:initialize(config)
+      if session then
+        session:initialize(config)
+      end
     end
   end)
   return session
 end
 
 
---- Launch a new debug adapter and then initialize it with config
---
--- Adapter:
---    command: string     -- command to invoke
---    args:    string[]   -- arguments for the command
---    options?: {
---      env?: {}          -- Set the environment variables for the command
---      cwd?: string      -- Set the working directory for the command
---    }
---
---
--- Configuration:         -- Specifies how the debug adapter should connect/launch the debugee
---    request: string     -- attach or launch
---    ...                 -- debug adapter specific options
---
+--- Launch an executable debug adapter and initialize a session
+---
+---@param adapter ExecutableAdapter
+---@param config Configuration
+---@param opts table
 function M.launch(adapter, config, opts)
-  session = require('dap.session'):spawn(adapter, opts)
-  session:initialize(config)
-  return session
+  local s = require('dap.session'):spawn(adapter, opts)
+  session = s
+  s:initialize(config)
+  return s
 end
 
 
@@ -715,12 +724,13 @@ function M._vim_exit_handler()
 end
 
 
---- Return the current session or nil
+---@return Session|nil
 function M.session()
   return session
 end
 
 
+---@param s Session|nil
 function M.set_session(s)
   session = s
 end
