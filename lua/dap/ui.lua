@@ -192,7 +192,12 @@ function M.new_tree(opts)
     }
     context = vim.tbl_deep_extend('keep', context, extra_context)
     for _, child in pairs(opts.get_children(value)) do
-      layer.render({child}, with_indent(indent, opts.render_child), context, api.nvim_buf_line_count(layer.buf))
+      local ok, line_count = pcall(api.nvim_buf_line_count, layer.buf)
+      if not ok then
+        -- User might have closed the buffer
+        return
+      end
+      layer.render({child}, with_indent(indent, opts.render_child), context, line_count)
       if is_expanded(child) then
         render_all_expanded(layer, child, indent + 2)
       end
@@ -414,6 +419,9 @@ function M.layer(buf)
     -- start is 0-indexed
     -- end_ is 0-indexed exclusive
     render = function(xs, render_fn, context, start, end_)
+      if not api.nvim_buf_is_valid(buf) then
+        return
+      end
       local modifiable = api.nvim_buf_get_option(buf, 'modifiable')
       api.nvim_buf_set_option(buf, 'modifiable', true)
       if not start and not end_ then

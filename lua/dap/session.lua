@@ -101,7 +101,7 @@ local mime_to_filetype = {
 local Session = {}
 
 local ns_pos = 'dap_pos'
-local terminal_buf
+local terminal_buf, terminal_width, terminal_height
 
 local NIL = vim.NIL
 
@@ -185,6 +185,21 @@ local function launch_external_terminal(terminal, args)
 end
 
 
+local function create_terminal_buf(terminal_win_cmd)
+  local cur_win = api.nvim_get_current_win()
+  if type(terminal_win_cmd) == "string" then
+    api.nvim_command(terminal_win_cmd)
+    local bufnr = api.nvim_get_current_buf()
+    local win = api.nvim_get_current_win()
+    api.nvim_set_current_win(cur_win)
+    return bufnr, win
+  else
+    assert(type(terminal_win_cmd) == "function", "terminal_win_cmd must be a string or a function")
+    return terminal_win_cmd()
+  end
+end
+
+
 local function run_in_terminal(self, request)
   local body = request.arguments
   log.debug('run_in_terminal', body)
@@ -205,38 +220,61 @@ local function run_in_terminal(self, request)
       return
     end
   end
-  local cur_win = api.nvim_get_current_win()
   local cur_buf = api.nvim_get_current_buf()
   if terminal_buf and api.nvim_buf_is_valid(terminal_buf) then
-    local terminal_buf_win = false
     api.nvim_buf_set_option(terminal_buf, 'modified', false)
-    for _, win in pairs(api.nvim_tabpage_list_wins(0)) do
-      if api.nvim_win_get_buf(win) == terminal_buf then
-        terminal_buf_win = true
-        api.nvim_set_current_win(win)
-      end
-    end
-    if not terminal_buf_win then
-      api.nvim_buf_delete(terminal_buf, {force=true})
-      api.nvim_command(dap().defaults[self.config.type].terminal_win_cmd)
-      terminal_buf = api.nvim_get_current_buf()
-    end
   else
-    api.nvim_command(dap().defaults[self.config.type].terminal_win_cmd)
-    terminal_buf = api.nvim_get_current_buf()
+    local terminal_win
+    terminal_buf, terminal_win = create_terminal_buf(settings.terminal_win_cmd)
+    if terminal_win then
+      vim.wo[terminal_win].number = false
+      vim.wo[terminal_win].relativenumber = false
+      vim.wo[terminal_win].signcolumn = "no"
+    end
+    terminal_width = terminal_win and api.nvim_win_get_width(terminal_win) or 80
+    terminal_height = terminal_win and api.nvim_win_get_height(terminal_win) or 40
   end
+  api.nvim_buf_set_name(terminal_buf, '[dap-terminal] ' .. (self.config.name or body.args[1]))
   local ok, path = pcall(api.nvim_buf_get_option, cur_buf, 'path')
   if ok then
     api.nvim_buf_set_option(terminal_buf, 'path', path)
   end
+  local jobid
+
+  local chan = api.nvim_open_term(terminal_buf, {
+    on_input = function(_, _, _, data)
+      pcall(api.nvim_chan_send, jobid, data)
+    end,
+  })
   local opts = {
-    clear_env = false;
     env = next(body.env or {}) and body.env or vim.empty_dict(),
-    cwd = (body.cwd and body.cwd ~= '') and body.cwd or nil
+    cwd = (body.cwd and body.cwd ~= '') and body.cwd or nil,
+    height = terminal_height,
+    width = terminal_width,
+    pty = true,
+    on_stdout = function(_, data)
+      local count = #data
+      for idx, line in pairs(data) do
+        if idx == count then
+          api.nvim_chan_send(chan, line)
+        else
+          api.nvim_chan_send(chan, line .. '\n')
+        end
+      end
+    end,
+    on_exit = function(_, exit_code)
+      api.nvim_chan_send(chan, '\r\n[Process exited ' .. tostring(exit_code) .. ']')
+      api.nvim_buf_set_keymap(terminal_buf, "t", "<CR>", "<cmd>bd!<CR>", { noremap = true, silent = true})
+    end,
   }
-  local jobid = vim.fn.termopen(body.args, opts)
-  if not dap().defaults[self.config.type].focus_terminal then
-      api.nvim_set_current_win(cur_win)
+  jobid = vim.fn.jobstart(body.args, opts)
+  if settings.focus_terminal then
+    for _, win in pairs(api.nvim_tabpage_list_wins(0)) do
+      if api.nvim_win_get_buf(win) == terminal_buf then
+        api.nvim_set_current_win(win)
+        break
+      end
+    end
   end
   if jobid == 0 or jobid == -1 then
     log.error('Could not spawn terminal', jobid, request)
@@ -314,8 +352,25 @@ local function with_win(win, fn, ...)
   local cur_win = api.nvim_get_current_win()
   api.nvim_set_current_win(win)
   local ok, err = pcall(fn, ...)
-  api.nvim_set_current_win(cur_win)
+  pcall(api.nvim_set_current_win, cur_win)
   assert(ok, err)
+end
+
+
+local function set_cursor(win, line, column)
+  local ok, err = pcall(api.nvim_win_set_cursor, win, { line, column - 1 })
+  if ok then
+    with_win(win, api.nvim_command, 'normal! zv')
+  else
+    local msg = string.format(
+      "Debug adapter reported a frame at line %s column %s, but: %s. "
+      .. "Ensure executable is up2date and if using a source mapping ensure it is correct",
+      line,
+      column,
+      err
+    )
+    utils.notify(msg, vim.log.levels.WARN)
+  end
 end
 
 
@@ -333,8 +388,7 @@ local function jump_to_location(bufnr, line, column)
   end
   for _, win in pairs(api.nvim_tabpage_list_wins(0)) do
     if api.nvim_win_get_buf(win) == bufnr then
-      api.nvim_win_set_cursor(win, { line, column - 1 })
-      with_win(win, api.nvim_command, 'normal! zv')
+      set_cursor(win, line, column)
       return
     end
   end
@@ -346,8 +400,7 @@ local function jump_to_location(bufnr, line, column)
     if buftype == '' or vim.b[winbuf].dap_source_buf == true then
       local bufchanged, _ = pcall(api.nvim_win_set_buf, win, bufnr)
       if bufchanged then
-        api.nvim_win_set_cursor(win, { line, column - 1 })
-        with_win(win, api.nvim_command, 'normal! zv')
+        set_cursor(win, line, column)
         return
       end
     end
@@ -414,7 +467,10 @@ function Session:source(source, cb)
     api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(response.content, '\n'))
     if not ft and source.path and vim.filetype then
       pcall(api.nvim_buf_set_name, buf, source.path)
-      pcall(vim.filetype.match, source.path, buf)
+      local ok, filetype = pcall(vim.filetype.match, source.path, buf)
+      if ok and filetype then
+        vim.bo[buf].filetype = filetype
+      end
     end
     if cb then
       cb(nil, buf)
@@ -471,6 +527,7 @@ function Session:event_stopped(stopped)
         'Resuming newly stopped thread. ' ..
         'To disable this set the `auto_continue_if_many_stopped` option to false.')
       self:request('continue', { threadId = stopped.threadId })
+      return
     else
       -- Allow thread to stop, but don't jump to it because stepping
       -- interleaved between threads is confusing
@@ -481,18 +538,14 @@ function Session:event_stopped(stopped)
     self.stopped_thread_id = stopped.threadId
   end
 
-  if stopped.threadId then
-    progress.report('Thread stopped: ' .. stopped.threadId)
-    self.threads[stopped.threadId].stopped = true
-  elseif stopped.allThreadsStopped then
+  if stopped.allThreadsStopped then
     progress.report('All threads stopped')
-    utils.notify(
-      'All threads stopped. ' .. stopped.reason and 'Reason: ' .. stopped.reason or '',
-      vim.log.levels.INFO
-    )
     for _, thread in pairs(self.threads) do
       thread.stopped = true
     end
+  elseif stopped.threadId then
+    progress.report('Thread stopped: ' .. stopped.threadId)
+    self.threads[stopped.threadId].stopped = true
   else
     utils.notify('Stopped event received, but no threadId or allThreadsStopped', vim.log.levels.WARN)
   end
@@ -656,7 +709,7 @@ do
       self:request('setBreakpoints', payload, function(err1, resp)
         if err1 then
           utils.notify('Error setting breakpoints: ' .. err1.message, vim.log.levels.ERROR)
-        else
+        elseif resp then
           for _, bp in pairs(resp.breakpoints) do
             breakpoints.set_state(bufnr, bp.line, bp)
             if not bp.verified then
@@ -733,7 +786,7 @@ function Session:handle_body(body)
     self.message_callbacks[decoded.request_seq] = nil
     if not callback then
       log.warn('No callback for ', decoded)
-      return
+      callback = function() end
     end
     if decoded.success then
       vim.schedule(function()

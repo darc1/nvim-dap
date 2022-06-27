@@ -396,7 +396,8 @@ that is used to create a split window:
 
 <
 
-The `terminal_win_cmd` defaults to `belowright new`.
+The `terminal_win_cmd` defaults to `belowright new`. The value can also be a
+function which returns a buffer number and optionally a window ID.
 
 Be default `dap` opens the integrated terminal but keeps focus on the current
 buffer. If you rather have focus to be shifted to the terminal when it opens
@@ -927,7 +928,7 @@ Lua module: dap.utils
 pick_process()                                         *dap.utils.pick_process*
         Show a prompt to pick a PID from a list of processes.
 
-        This uses `ps a` to retrieve the process list and won't work if `ps a`
-        is not available
+        This uses `ps ah` to retrieve the process list and won't work if `ps ah`
+        is not available. On windows this method uses `tasklist /nh /fo csv` command.
 
 vim:ft=help
